@@ -1,0 +1,117 @@
+from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
+import os
+
+# Initialize the Slack app with bot token and signing secret
+app = App(token=os.environ["SLACK_BOT_TOKEN"], signing_secret=os.environ["SLACK_SIGNING_SECRET"])
+
+# Slash command: /prioritize
+@app.command("/prioritize")
+def handle_prioritize_command(ack, body, respond):
+    ack()
+    respond(blocks=[
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "What would you like to do?"}
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Add New Project"},
+                    "action_id": "add_project"
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "View Prioritized List"},
+                    "action_id": "view_projects"
+                }
+            ]
+        }
+    ], response_type="ephemeral")
+
+# Button: Add New Project
+@app.action("add_project")
+def open_add_project_modal(ack, body, client):
+    ack()
+    trigger_id = body["trigger_id"]
+    client.views_open(
+        trigger_id=trigger_id,
+        view={
+            "type": "modal",
+            "callback_id": "submit_project",
+            "title": {"type": "plain_text", "text": "New Project"},
+            "submit": {"type": "plain_text", "text": "Submit"},
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "project_name",
+                    "label": {"type": "plain_text", "text": "Project Name"},
+                    "element": {"type": "plain_text_input", "action_id": "input"}
+                },
+                {
+                    "type": "input",
+                    "block_id": "project_desc",
+                    "label": {"type": "plain_text", "text": "Project Description"},
+                    "element": {"type": "plain_text_input", "action_id": "input", "multiline": True}
+                },
+                {
+                    "type": "input",
+                    "block_id": "expected_roi",
+                    "label": {"type": "plain_text", "text": "Expected ROI (%)"},
+                    "element": {"type": "plain_text_input", "action_id": "input"}
+                },
+                {
+                    "type": "input",
+                    "block_id": "effort",
+                    "label": {"type": "plain_text", "text": "Effort (Person-Months)"},
+                    "element": {"type": "plain_text_input", "action_id": "input"}
+                }
+            ]
+        }
+    )
+
+# Modal submission: store project and compute simple RICE-like score
+projects = []  # temporary in-memory store
+
+@app.view("submit_project")
+def handle_submit_project(ack, body, view, client):
+    ack()
+    user = body["user"]["id"]
+    values = view["state"]["values"]
+
+    project = {
+        "name": values["project_name"]["input"]["value"],
+        "description": values["project_desc"]["input"]["value"],
+        "roi": float(values["expected_roi"]["input"]["value"]),
+        "effort": float(values["effort"]["input"]["value"]),
+    }
+    project["score"] = project["roi"] / project["effort"]  # basic ROI/Effort calc
+    projects.append(project)
+
+    client.chat_postMessage(
+        channel=user,
+        text=f":white_check_mark: Project *{project['name']}* added with score {project['score']:.2f}."
+    )
+
+# Button: View Prioritized List
+@app.action("view_projects")
+def handle_view_projects(ack, body, client):
+    ack()
+    channel_id = body["channel"]["id"]
+    if not projects:
+        client.chat_postMessage(channel=channel_id, text="No projects added yet.")
+        return
+
+    sorted_projects = sorted(projects, key=lambda p: p["score"], reverse=True)
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": "*Top Projects:*"}}]
+    for i, proj in enumerate(sorted_projects, 1):
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"{i}. *{proj['name']}*\n{proj['description']}\nScore: {proj['score']:.2f}"}
+        })
+    client.chat_postMessage(channel=channel_id, blocks=blocks)
+
+if __name__ == "__main__":
+    SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"]).start()
